@@ -1,4 +1,26 @@
-
+create or replace function public._upsert_player_match_history_row(
+  p_match_id uuid,
+  p_player_id uuid,
+  p_match_date date,
+  p_match_time time without time zone,
+  p_status text,
+  p_winner_team smallint,
+  p_team_no smallint,
+  p_is_winner boolean,
+  p_mission_comeback_flag smallint,
+  p_tiebreak_win_flag smallint,
+  p_win_8_0_flag smallint,
+  p_win_7_1_flag smallint,
+  p_win_6_2_flag smallint,
+  p_mission_comeback_points integer,
+  p_tiebreak_win_points integer,
+  p_win_8_0_points integer,
+  p_win_7_1_points integer,
+  p_win_6_2_points integer
+)
+returns void
+language plpgsql
+as $$
 begin
   -- If the slot is empty (player_id null), do nothing
   if p_player_id is null then
@@ -27,8 +49,7 @@ begin
     win_7_1_points,
     win_6_2_points,
 
-    -- IMPORTANT: we set these to 0 on insert to avoid NULL totals.
-    -- Manual flags may later override points; we preserve them on conflict update.
+    -- computed
     win_loss_points,
     match_total_points
   )
@@ -54,19 +75,19 @@ begin
     coalesce(p_win_7_1_points, 0),
     coalesce(p_win_6_2_points, 0),
 
-    -- If you have a specific win/loss scoring system, change these constants.
-    -- Safe default: win=3, loss=0 when completed.
+    -- ✅ Win/Loss scoring: win=3, loss=1 (only when completed)
     case
       when p_status = 'completed' and coalesce(p_is_winner, false) then 3
-      when p_status = 'completed' then 0
+      when p_status = 'completed' then 1
       else 0
     end,
 
-    -- Total points = win/loss + match-derived bonuses.
-    -- Manual bonus points (no_fault/no_return) are NOT included here on insert; those get added later.
-    case
-      when p_status = 'completed' and coalesce(p_is_winner, false) then 3 else 0
-    end
+    -- ✅ Total points = win/loss + match-derived bonuses (manual points preserved on update)
+    (case
+      when p_status = 'completed' and coalesce(p_is_winner, false) then 3
+      when p_status = 'completed' then 1
+      else 0
+    end)
     + coalesce(p_mission_comeback_points, 0)
     + coalesce(p_tiebreak_win_points, 0)
     + coalesce(p_win_8_0_points, 0)
@@ -94,8 +115,7 @@ begin
     win_7_1_points = excluded.win_7_1_points,
     win_6_2_points = excluded.win_6_2_points,
 
-    -- Update win/loss + recompute match_total_points,
-    -- BUT preserve manual points that already exist in the row.
+    -- recompute totals, preserving manual points already stored in the row
     win_loss_points = excluded.win_loss_points,
     match_total_points =
       excluded.win_loss_points
@@ -112,9 +132,28 @@ begin
   -- no_fault_miss_points, no_return_miss_points
   -- so manual flags/points are preserved.
 end;
+$$;
 
-
-
+-- Bonus points breakdown for the /leaderboard/points page
+create or replace function public.leaderboard_points_range(
+  p_start_date date,
+  p_end_date date
+)
+returns table (
+  player_id uuid,
+  player_name text,
+  comeback_mission_count int,
+  tiebreak_wins_count int,
+  no_double_fault_games_count int,
+  no_return_miss_games_count int,
+  win_8_0_count int,
+  win_7_1_count int,
+  win_6_2_count int,
+  total_mission_points int
+)
+language sql
+stable
+as $$
 with filtered_pmh as (
   select pmh.*
   from public.player_match_history pmh
@@ -127,18 +166,18 @@ per_player as (
     p.id as player_id,
     p.name as player_name,
 
-    -- These bonuses only count when the player actually won (consistent with how points are awarded)
+    -- winners-only bonuses (consistent with how points are awarded)
     coalesce(sum(case when f.is_winner = true and coalesce(f.mission_comeback_flag, 0) = 1 then 1 else 0 end), 0)::int as comeback_mission_count,
-    coalesce(sum(case when f.is_winner = true and coalesce(f.tiebreak_win_flag, 0) = 1 then 1 else 0 end), 0)::int as tiebreak_wins_count,
-    coalesce(sum(case when f.is_winner = true and coalesce(f.win_8_0_flag, 0) = 1 then 1 else 0 end), 0)::int as win_8_0_count,
-    coalesce(sum(case when f.is_winner = true and coalesce(f.win_7_1_flag, 0) = 1 then 1 else 0 end), 0)::int as win_7_1_count,
-    coalesce(sum(case when f.is_winner = true and coalesce(f.win_6_2_flag, 0) = 1 then 1 else 0 end), 0)::int as win_6_2_count,
+    coalesce(sum(case when f.is_winner = true and coalesce(f.tiebreak_win_flag, 0) = 1 then 1 else 0 end), 0)::int      as tiebreak_wins_count,
+    coalesce(sum(case when f.is_winner = true and coalesce(f.win_8_0_flag, 0) = 1 then 1 else 0 end), 0)::int           as win_8_0_count,
+    coalesce(sum(case when f.is_winner = true and coalesce(f.win_7_1_flag, 0) = 1 then 1 else 0 end), 0)::int           as win_7_1_count,
+    coalesce(sum(case when f.is_winner = true and coalesce(f.win_6_2_flag, 0) = 1 then 1 else 0 end), 0)::int           as win_6_2_count,
 
-    -- Manual per-player flags (count regardless of winner)
-    coalesce(sum(case when coalesce(f.no_fault_miss_flag, 0) = 1 then 1 else 0 end), 0)::int as no_double_fault_games_count,
+    -- manual per-player flags (count regardless of winner)
+    coalesce(sum(case when coalesce(f.no_fault_miss_flag, 0) = 1 then 1 else 0 end), 0)::int  as no_double_fault_games_count,
     coalesce(sum(case when coalesce(f.no_return_miss_flag, 0) = 1 then 1 else 0 end), 0)::int as no_return_miss_games_count,
 
-    -- Total mission points = sum of mission point components from PMH (NOT match_total_points)
+    -- total mission points = sum of component mission point columns
     coalesce(sum(
       coalesce(f.mission_comeback_points, 0)
       + coalesce(f.tiebreak_win_points, 0)
@@ -168,3 +207,4 @@ select
   total_mission_points
 from per_player
 order by player_name asc;
+$$;
