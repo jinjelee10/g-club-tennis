@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
 import { supabaseBrowser } from "@/lib/supabase/browser";
 
 type Mode = "signin" | "signup";
@@ -228,6 +229,23 @@ export default function LoginPage() {
             ? "Sign in"
             : "Create account"}
         </button>
+
+        {/* ✅ JPEG below the sign-in / create button */}
+        <div style={{ marginTop: 14 }}>
+          <Image
+            src="/login-photo.jpg"
+            alt="G Club Tennis"
+            width={900}
+            height={600}
+            priority
+            style={{
+              width: "100%",
+              height: "auto",
+              borderRadius: 12,
+              border: "1px solid #e5e7eb",
+            }}
+          />
+        </div>
 
         {status && <p style={{ marginTop: 6 }}>{status}</p>}
       </form>
